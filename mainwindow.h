@@ -2,16 +2,23 @@
 
 #include <QMainWindow>
 #include <QByteArray>
+#include <QVector>
 
 class QTabWidget;
 class QTextBrowser;
 class QPlainTextEdit;
-class QPushButton;
 class QLabel;
 class QComboBox;
+class QGroupBox;
 
 class QNetworkAccessManager;
 class QNetworkReply;
+
+struct ChatLine {
+    QString who;   // "system" | "you" | "assistant"
+    QString text;
+    QString ts;    // timestamp string
+};
 
 class MainWindow : public QMainWindow
 {
@@ -25,17 +32,22 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
-    void onSendClicked();
     void onReplyReadyRead();
     void onReplyFinished();
+
     void onSetApiKey();
     void onNewChat();
+
+    void onSaveConversation();
+    void onDeleteConversation();
+    void onConversationChanged(int index);
 
 private:
     // UI
     void setStatus(const QString& text);
     void appendChatMessage(const QString& who, const QString& text);
     void logMessage(const QString& text);
+    void rebuildChatViewFromMemory();
 
     void startAssistantMessage();
     void appendAssistantDelta(const QString& delta);
@@ -48,6 +60,17 @@ private:
     bool saveApiKeyToDisk(const QString& key, QString* errOut = nullptr);
     QString getApiKeyOrEmpty() const;
 
+    // Conversations (saved)
+    QString convRootDir() const;
+    QString sanitizeConvName(const QString& name) const;
+    QString convFilePathForName(const QString& name) const;
+    void ensureConvDirs();
+    void refreshConversationDropdown();
+
+    bool saveConversationToDisk(const QString& name, QString* errOut = nullptr);
+    bool loadConversationFromDisk(const QString& name, QString* errOut = nullptr);
+    bool deleteConversationFromDisk(const QString& name, QString* errOut = nullptr);
+
     // Network
     void sendToOpenAI(const QString& userText);
 
@@ -55,15 +78,20 @@ private:
     // Tabs
     QTabWidget*     m_tabs = nullptr;
 
-    // Tab 1: Prompt page
+    // Tab 1: Prompt
     QWidget*        m_promptTab = nullptr;
     QComboBox*      m_modelBox = nullptr;
+    QComboBox*      m_convBox = nullptr;
     QLabel*         m_status = nullptr;
+
     QPlainTextEdit* m_responseBox = nullptr;
     QPlainTextEdit* m_questionBox = nullptr;
-    QPushButton*    m_sendBtn = nullptr;
+    QLabel*         m_hintLabel = nullptr;
 
-    // Tab 2: Chat transcript
+    QGroupBox*      m_responseGroup = nullptr;
+    QGroupBox*      m_questionGroup = nullptr;
+
+    // Tab 2: Chat
     QTextBrowser*   m_chatView = nullptr;
 
     // Tab 3: Logs
@@ -73,12 +101,18 @@ private:
     QNetworkAccessManager* m_net = nullptr;
     QNetworkReply*         m_reply = nullptr;
 
-    // Streaming state
+    // Streaming
     QByteArray m_sseBuffer;
     bool       m_inAssistant = false;
     QString    m_assistantText;
 
-    // Conversation state (the real fix)
-    QString    m_lastResponseId;     // previous_response_id for next call
-    QString    m_pendingResponseId;  // set from response.created while streaming
+    // Conversation chain state (Responses API)
+    QString    m_lastResponseId;
+    QString    m_pendingResponseId;
+
+    // Local transcript
+    QVector<ChatLine> m_chatLines;
+
+    QString    m_currentConversationName;
+    bool       m_suppressConvChange = false;
 };

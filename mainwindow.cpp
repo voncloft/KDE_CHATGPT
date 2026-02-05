@@ -3,19 +3,21 @@
 #include <QTabWidget>
 #include <QTextBrowser>
 #include <QPlainTextEdit>
-#include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QFrame>
 #include <QDateTime>
 #include <QScrollBar>
 #include <QTextCursor>
+#include <QSizePolicy>
 
 #include <QMenuBar>
 #include <QAction>
 #include <QInputDialog>
+#include <QMessageBox>
+
 #include <QFile>
 #include <QDir>
 #include <QFileDevice>
@@ -31,24 +33,6 @@
 
 /* ---------------- helpers ---------------- */
 
-static QFrame* makeGroupFrame(const QString& title, QWidget* content)
-{
-    auto* frame = new QFrame;
-    frame->setFrameShape(QFrame::Box);
-    frame->setLineWidth(2);
-
-    auto* titleLabel = new QLabel(title);
-    titleLabel->setStyleSheet("font-weight: 600; padding: 6px;");
-
-    auto* v = new QVBoxLayout(frame);
-    v->setContentsMargins(12, 12, 12, 12);
-    v->setSpacing(10);
-    v->addWidget(titleLabel);
-    v->addWidget(content);
-
-    return frame;
-}
-
 static QString jsonToPretty(const QJsonObject& obj)
 {
     return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
@@ -56,7 +40,6 @@ static QString jsonToPretty(const QJsonObject& obj)
 
 static QByteArray sseExtractData(const QByteArray& eventBlock)
 {
-    // Concatenate all "data:" lines (SSE spec)
     const QList<QByteArray> lines = eventBlock.split('\n');
     QByteArray data;
     for (QByteArray line : lines) {
@@ -71,13 +54,26 @@ static QByteArray sseExtractData(const QByteArray& eventBlock)
     return data;
 }
 
+static QGroupBox* makeGroupBox(const QString& title, QWidget* inner)
+{
+    auto* gb = new QGroupBox(title);
+    gb->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    auto* v = new QVBoxLayout(gb);
+    v->setContentsMargins(12, 18, 12, 12); // give title breathing room
+    v->setSpacing(10);
+    v->addWidget(inner, 1);
+
+    return gb;
+}
+
 /* ---------------- ctor/dtor ---------------- */
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle("ChatGPT KDE UI (Qt6 + OpenAI)");
-    resize(1200, 760);
+    resize(1250, 820);
 
     m_net = new QNetworkAccessManager(this);
 
@@ -89,9 +85,19 @@ MainWindow::MainWindow(QWidget *parent)
         connect(setKey, &QAction::triggered, this, &MainWindow::onSetApiKey);
         fileMenu->addAction(setKey);
 
-        auto* newChat = new QAction("New Chat (clear memory)", this);
+        fileMenu->addSeparator();
+
+        auto* newChat = new QAction("New Chat", this);
         connect(newChat, &QAction::triggered, this, &MainWindow::onNewChat);
         fileMenu->addAction(newChat);
+
+        auto* saveConv = new QAction("Save Conversation…", this);
+        connect(saveConv, &QAction::triggered, this, &MainWindow::onSaveConversation);
+        fileMenu->addAction(saveConv);
+
+        auto* delConv = new QAction("Delete Conversation…", this);
+        connect(delConv, &QAction::triggered, this, &MainWindow::onDeleteConversation);
+        fileMenu->addAction(delConv);
 
         fileMenu->addSeparator();
         fileMenu->addAction("Quit", this, &QWidget::close);
@@ -101,73 +107,80 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs = new QTabWidget;
     setCentralWidget(m_tabs);
 
-    /* -------- Tab 1: Prompt page -------- */
+    /* -------- Tab 1: Prompt -------- */
     m_promptTab = new QWidget;
 
     m_modelBox = new QComboBox;
-    m_modelBox->addItem("gpt-4o-mini");
-    m_modelBox->addItem("gpt-4o");
-    m_modelBox->addItem("gpt-5"); // may require access
+    m_modelBox->addItems({ "gpt-4o-mini", "gpt-4o", "gpt-5" });
     m_modelBox->setCurrentText("gpt-4o-mini");
+
+    m_convBox = new QComboBox;
+    connect(m_convBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onConversationChanged);
 
     m_status = new QLabel("Ready.");
     m_status->setStyleSheet("color:#444; padding-left:6px;");
 
     m_responseBox = new QPlainTextEdit;
     m_responseBox->setReadOnly(true);
-    m_responseBox->setPlaceholderText("Assistant response will stream here...");
+    m_responseBox->setPlaceholderText("Assistant response will stream here…");
+    m_responseBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_responseBox->setMinimumHeight(340);
-    m_responseBox->setStyleSheet("QPlainTextEdit { padding: 10px; }");
 
     m_questionBox = new QPlainTextEdit;
-    m_questionBox->setPlaceholderText("Type your question... (Enter = send, Shift+Enter = newline)");
-    m_questionBox->setMinimumHeight(280);
-    m_questionBox->setStyleSheet("QPlainTextEdit { padding: 10px; }");
+    m_questionBox->setPlaceholderText("Type your question…");
+    m_questionBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_questionBox->setMinimumHeight(260);
     m_questionBox->installEventFilter(this);
 
-    m_sendBtn = new QPushButton("Send");
-    m_sendBtn->setMinimumHeight(46);
-    connect(m_sendBtn, &QPushButton::clicked, this, &MainWindow::onSendClicked);
+    m_hintLabel = new QLabel("Enter = send   |   Shift+Enter = newline");
+    m_hintLabel->setStyleSheet("color:#666; font-size:12px; padding-left:2px;");
 
+    // top row
     auto* topRow = new QWidget;
     {
         auto* h = new QHBoxLayout(topRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(10);
-        h->addWidget(new QLabel("Model:"));
+
+        h->addWidget(new QLabel("Model:"), 0);
         h->addWidget(m_modelBox, 0);
+
+        h->addSpacing(12);
+
+        h->addWidget(new QLabel("Conversation:"), 0);
+        h->addWidget(m_convBox, 1);
+
         h->addStretch(1);
         h->addWidget(m_status, 0);
     }
 
-    auto* responseFrame = makeGroupFrame("Your Response", m_responseBox);
+    // group boxes (real containers, no fake frame)
+    m_responseGroup = makeGroupBox("Your Response", m_responseBox);
 
-    auto* questionContainer = new QWidget;
+    auto* questionInner = new QWidget;
     {
-        auto* v = new QVBoxLayout(questionContainer);
+        auto* v = new QVBoxLayout(questionInner);
         v->setContentsMargins(0, 0, 0, 0);
-        v->setSpacing(10);
+        v->setSpacing(8);
         v->addWidget(m_questionBox, 1);
-
-        auto* h = new QHBoxLayout;
-        h->addStretch(1);
-        h->addWidget(m_sendBtn);
-        v->addLayout(h);
+        v->addWidget(m_hintLabel, 0, Qt::AlignLeft);
     }
-    auto* questionFrame = makeGroupFrame("My Question", questionContainer);
+    m_questionGroup = makeGroupBox("My Question", questionInner);
 
+    // prompt layout
     {
         auto* v = new QVBoxLayout(m_promptTab);
         v->setContentsMargins(14, 14, 14, 14);
         v->setSpacing(12);
         v->addWidget(topRow, 0);
-        v->addWidget(responseFrame, 2);
-        v->addWidget(questionFrame, 2);
+        v->addWidget(m_responseGroup, 2);
+        v->addWidget(m_questionGroup, 2);
     }
 
     m_tabs->addTab(m_promptTab, "Prompt");
 
-    /* -------- Tab 2: Chat transcript -------- */
+    /* -------- Tab 2: Chat -------- */
     m_chatView = new QTextBrowser;
     m_chatView->setOpenExternalLinks(true);
     m_chatView->setStyleSheet("QTextBrowser { padding: 12px; font-size: 14px; }");
@@ -179,7 +192,11 @@ MainWindow::MainWindow(QWidget *parent)
     m_logView->setStyleSheet("QPlainTextEdit { padding: 10px; font-family: monospace; font-size: 12px; }");
     m_tabs->addTab(m_logView, "Logs");
 
-    // Startup text goes to Chat tab
+    // Conversations folder + dropdown
+    ensureConvDirs();
+    refreshConversationDropdown();
+
+    // Startup message into Chat tab
     if (loadApiKeyFromDisk().isEmpty()) {
         appendChatMessage("system",
             "Wired for OpenAI Responses API (streaming).\n"
@@ -193,6 +210,8 @@ MainWindow::MainWindow(QWidget *parent)
             "Ask questions in the Prompt tab.");
         logMessage("API key loaded from: " + apiKeyPath());
     }
+
+    onNewChat();
 }
 
 MainWindow::~MainWindow()
@@ -204,18 +223,22 @@ MainWindow::~MainWindow()
     }
 }
 
-/* ---------------- Enter-to-send ---------------- */
+/* ---------------- Enter to send ---------------- */
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == m_questionBox && event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
-
         const bool isEnter = (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter);
         const bool shift = (ke->modifiers() & Qt::ShiftModifier);
 
         if (isEnter && !shift) {
-            onSendClicked();
+            const QString userText = m_questionBox->toPlainText().trimmed();
+            if (!userText.isEmpty() && !m_reply) {
+                appendChatMessage("you", userText);
+                m_questionBox->clear();
+                sendToOpenAI(userText);
+            }
             return true;
         }
     }
@@ -233,14 +256,34 @@ void MainWindow::logMessage(const QString& text)
 {
     const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
     m_logView->appendPlainText(QString("[%1] %2").arg(ts, text));
+    m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+}
 
-    auto* sb = m_logView->verticalScrollBar();
-    sb->setValue(sb->maximum());
+void MainWindow::rebuildChatViewFromMemory()
+{
+    m_chatView->clear();
+    for (const auto& line : m_chatLines) {
+        const QString header =
+            (line.who == "you") ? "You" :
+            (line.who == "assistant") ? "Assistant" :
+            "System";
+
+        QString html;
+        html += "<div style='margin-bottom:12px;'>";
+        html += "<div style='font-weight:700; margin-bottom:4px;'>" + header.toHtmlEscaped()
+             + " <span style='font-weight:400; color:#666; font-size:12px;'>(" + line.ts.toHtmlEscaped() + ")</span></div>";
+        html += "<div style='white-space:pre-wrap;'>" + line.text.toHtmlEscaped() + "</div>";
+        html += "</div>";
+
+        m_chatView->append(html);
+    }
+    m_chatView->verticalScrollBar()->setValue(m_chatView->verticalScrollBar()->maximum());
 }
 
 void MainWindow::appendChatMessage(const QString& who, const QString& text)
 {
     const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    m_chatLines.push_back(ChatLine{who, text, ts});
 
     const QString header =
         (who == "you") ? "You" :
@@ -255,9 +298,7 @@ void MainWindow::appendChatMessage(const QString& who, const QString& text)
     html += "</div>";
 
     m_chatView->append(html);
-
-    auto* sb = m_chatView->verticalScrollBar();
-    sb->setValue(sb->maximum());
+    m_chatView->verticalScrollBar()->setValue(m_chatView->verticalScrollBar()->maximum());
 }
 
 /* ---------------- API key ---------------- */
@@ -270,10 +311,8 @@ QString MainWindow::apiKeyPath() const
 QString MainWindow::loadApiKeyFromDisk() const
 {
     QFile f(apiKeyPath());
-    if (!f.exists())
-        return {};
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {};
+    if (!f.exists()) return {};
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
     return QString::fromUtf8(f.readAll()).trimmed();
 }
 
@@ -284,12 +323,10 @@ bool MainWindow::saveApiKeyToDisk(const QString& key, QString* errOut)
         if (errOut) *errOut = f.errorString();
         return false;
     }
-
     f.write(key.toUtf8());
     f.write("\n");
     f.flush();
     f.close();
-
     f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner); // 600
     return true;
 }
@@ -311,9 +348,7 @@ void MainWindow::onSetApiKey()
         &ok
     ).trimmed();
 
-    if (!ok)
-        return;
-
+    if (!ok) return;
     if (key.isEmpty()) {
         appendChatMessage("system", "API key was empty. Not saved.");
         logMessage("Set API key: empty input");
@@ -331,38 +366,252 @@ void MainWindow::onSetApiKey()
     logMessage("API key saved to: " + apiKeyPath());
 }
 
-void MainWindow::onNewChat()
+/* ---------------- conversations on disk ---------------- */
+
+QString MainWindow::convRootDir() const
 {
-    // This is the important part: clearing memory for next turn
-    m_lastResponseId.clear();
+    return QDir::homePath() + "/.chatgpt_kde";
+}
+
+void MainWindow::ensureConvDirs()
+{
+    QDir d(convRootDir());
+    if (!d.exists()) d.mkpath(".");
+    if (!d.exists("conversations")) d.mkpath("conversations");
+}
+
+QString MainWindow::sanitizeConvName(const QString& name) const
+{
+    QString s = name.trimmed();
+    s.replace("/", "_");
+    s.replace("\\", "_");
+    s.replace("..", "_");
+    if (s.isEmpty()) s = "conversation";
+    return s;
+}
+
+QString MainWindow::convFilePathForName(const QString& name) const
+{
+    return convRootDir() + "/conversations/" + sanitizeConvName(name) + ".json";
+}
+
+void MainWindow::refreshConversationDropdown()
+{
+    m_suppressConvChange = true;
+
+    const QString prev = m_currentConversationName;
+
+    m_convBox->clear();
+    m_convBox->addItem("(New chat)");
+
+    QDir d(convRootDir() + "/conversations");
+    const QStringList files = d.entryList(QStringList() << "*.json", QDir::Files, QDir::Name);
+    for (QString f : files) {
+        if (f.endsWith(".json")) f.chop(5);
+        m_convBox->addItem(f);
+    }
+
+    int idx = 0;
+    if (!prev.isEmpty()) {
+        const int found = m_convBox->findText(prev);
+        if (found >= 0) idx = found;
+    }
+    m_convBox->setCurrentIndex(idx);
+
+    m_suppressConvChange = false;
+}
+
+bool MainWindow::saveConversationToDisk(const QString& name, QString* errOut)
+{
+    ensureConvDirs();
+
+    QJsonObject root;
+    root["name"] = name;
+    root["last_response_id"] = m_lastResponseId;
+
+    QJsonArray lines;
+    for (const auto& cl : m_chatLines) {
+        QJsonObject o;
+        o["who"] = cl.who;
+        o["text"] = cl.text;
+        o["ts"] = cl.ts;
+        lines.append(o);
+    }
+    root["chat_lines"] = lines;
+
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+
+    QFile f(convFilePathForName(name));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+    if (f.write(bytes) != bytes.size()) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+    f.flush();
+    f.close();
+    return true;
+}
+
+bool MainWindow::loadConversationFromDisk(const QString& name, QString* errOut)
+{
+    QFile f(convFilePathForName(name));
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+
+    QJsonParseError pe{};
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isObject()) {
+        if (errOut) *errOut = "Invalid JSON";
+        return false;
+    }
+
+    const QJsonObject root = doc.object();
+    m_lastResponseId = root.value("last_response_id").toString();
     m_pendingResponseId.clear();
 
-    appendChatMessage("system", "New chat started (memory cleared).");
-    logMessage("Conversation state cleared (previous_response_id reset).");
+    m_chatLines.clear();
+    const QJsonArray lines = root.value("chat_lines").toArray();
+    for (const auto& v : lines) {
+        const QJsonObject o = v.toObject();
+        ChatLine cl;
+        cl.who = o.value("who").toString();
+        cl.text = o.value("text").toString();
+        cl.ts  = o.value("ts").toString();
+        m_chatLines.push_back(cl);
+    }
+
+    rebuildChatViewFromMemory();
 
     m_responseBox->clear();
     m_questionBox->clear();
     setStatus("Ready.");
+    return true;
 }
 
-/* ---------------- send / streaming ---------------- */
-
-void MainWindow::onSendClicked()
+bool MainWindow::deleteConversationFromDisk(const QString& name, QString* errOut)
 {
-    const QString userText = m_questionBox->toPlainText().trimmed();
-    if (userText.isEmpty())
-        return;
+    QFile f(convFilePathForName(name));
+    if (!f.exists()) return true;
+    if (!f.remove()) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+    return true;
+}
 
-    if (m_reply) {
-        setStatus("Busy (request in progress)...");
+/* ---------------- menu actions ---------------- */
+
+void MainWindow::onNewChat()
+{
+    m_currentConversationName.clear();
+    m_lastResponseId.clear();
+    m_pendingResponseId.clear();
+
+    m_sseBuffer.clear();
+    m_inAssistant = false;
+    m_assistantText.clear();
+
+    m_chatLines.clear();
+    m_chatView->clear();
+
+    appendChatMessage("system", "New chat started (memory cleared).");
+    logMessage("New chat: previous_response_id cleared.");
+
+    m_responseBox->clear();
+    m_questionBox->clear();
+    setStatus("Ready.");
+
+    refreshConversationDropdown();
+    m_convBox->setCurrentIndex(0);
+}
+
+void MainWindow::onSaveConversation()
+{
+    bool ok = false;
+    QString suggested = m_currentConversationName.isEmpty() ? "conversation" : m_currentConversationName;
+
+    const QString name = QInputDialog::getText(
+        this,
+        "Save Conversation",
+        "Conversation name:",
+        QLineEdit::Normal,
+        suggested,
+        &ok
+    ).trimmed();
+
+    if (!ok || name.isEmpty()) return;
+
+    QString err;
+    if (!saveConversationToDisk(name, &err)) {
+        QMessageBox::warning(this, "Save failed", "Failed to save conversation:\n" + err);
+        logMessage("Save failed: " + err);
         return;
     }
 
-    appendChatMessage("you", userText);
-    m_questionBox->clear();
+    m_currentConversationName = sanitizeConvName(name);
+    appendChatMessage("system", "Conversation saved as: " + m_currentConversationName);
+    logMessage("Conversation saved: " + m_currentConversationName);
 
-    sendToOpenAI(userText);
+    refreshConversationDropdown();
+    const int idx = m_convBox->findText(m_currentConversationName);
+    if (idx >= 0) m_convBox->setCurrentIndex(idx);
 }
+
+void MainWindow::onDeleteConversation()
+{
+    const QString name = m_convBox->currentText();
+    if (name.isEmpty() || name == "(New chat)") {
+        QMessageBox::information(this, "Delete conversation", "Select a saved conversation first.");
+        return;
+    }
+
+    const auto res = QMessageBox::question(
+        this,
+        "Delete Conversation",
+        "Delete conversation '" + name + "'?\n(This removes the saved file.)"
+    );
+    if (res != QMessageBox::Yes) return;
+
+    QString err;
+    if (!deleteConversationFromDisk(name, &err)) {
+        QMessageBox::warning(this, "Delete failed", "Failed to delete conversation:\n" + err);
+        logMessage("Delete failed: " + err);
+        return;
+    }
+
+    logMessage("Conversation deleted: " + name);
+    if (m_currentConversationName == name) onNewChat();
+    else refreshConversationDropdown();
+}
+
+void MainWindow::onConversationChanged(int index)
+{
+    if (m_suppressConvChange) return;
+
+    if (index <= 0) {
+        onNewChat();
+        return;
+    }
+
+    const QString name = m_convBox->itemText(index);
+    QString err;
+    if (!loadConversationFromDisk(name, &err)) {
+        QMessageBox::warning(this, "Load failed", "Failed to load conversation:\n" + err);
+        logMessage("Load failed: " + err);
+        return;
+    }
+
+    m_currentConversationName = name;
+    appendChatMessage("system", "Loaded conversation: " + name);
+    logMessage("Loaded conversation: " + name + " (previous_response_id " + (m_lastResponseId.isEmpty() ? "empty" : "set") + ")");
+}
+
+/* ---------------- streaming UI ---------------- */
 
 void MainWindow::startAssistantMessage()
 {
@@ -373,48 +622,41 @@ void MainWindow::startAssistantMessage()
 
 void MainWindow::appendAssistantDelta(const QString& delta)
 {
-    if (!m_inAssistant)
-        startAssistantMessage();
-
+    if (!m_inAssistant) startAssistantMessage();
     m_assistantText += delta;
     m_responseBox->setPlainText(m_assistantText);
-
-    QTextCursor c = m_responseBox->textCursor();
+    auto c = m_responseBox->textCursor();
     c.movePosition(QTextCursor::End);
     m_responseBox->setTextCursor(c);
 }
 
 void MainWindow::setAssistantFullText(const QString& text)
 {
-    if (!m_inAssistant)
-        startAssistantMessage();
-
+    if (!m_inAssistant) startAssistantMessage();
     m_assistantText = text;
     m_responseBox->setPlainText(m_assistantText);
-
-    QTextCursor c = m_responseBox->textCursor();
+    auto c = m_responseBox->textCursor();
     c.movePosition(QTextCursor::End);
     m_responseBox->setTextCursor(c);
 }
 
 void MainWindow::finalizeAssistantMessage()
 {
-    if (!m_inAssistant)
-        return;
-
+    if (!m_inAssistant) return;
     m_inAssistant = false;
 
     const QString finalText = m_assistantText.trimmed();
     if (!finalText.isEmpty())
         appendChatMessage("assistant", finalText);
 
-    // If we got a response ID, lock it in for the next turn (this is the memory)
     if (!m_pendingResponseId.isEmpty()) {
         m_lastResponseId = m_pendingResponseId;
         m_pendingResponseId.clear();
-        logMessage("Conversation chained: lastResponseId set.");
+        logMessage("Chained memory updated (previous_response_id set for next turn).");
     }
 }
+
+/* ---------------- network ---------------- */
 
 void MainWindow::sendToOpenAI(const QString& userText)
 {
@@ -433,17 +675,13 @@ void MainWindow::sendToOpenAI(const QString& userText)
     req.setRawHeader("Accept", "text/event-stream");
     req.setRawHeader("Authorization", QByteArray("Bearer ") + apiKey.toUtf8());
 
-    // Request body
     QJsonObject body;
     body["model"] = model;
     body["stream"] = true;
     body["store"] = true;
-
-    // THIS is the memory mechanism: chain to the previous response if we have one
     if (!m_lastResponseId.isEmpty())
         body["previous_response_id"] = m_lastResponseId;
 
-    // Keep input simple (string content) like the docs show
     QJsonArray input;
     QJsonObject msg;
     msg["role"] = "user";
@@ -453,16 +691,15 @@ void MainWindow::sendToOpenAI(const QString& userText)
 
     const QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
-    setStatus("Sending...");
-    m_sendBtn->setEnabled(false);
-
+    setStatus("Sending…");
     m_sseBuffer.clear();
     m_pendingResponseId.clear();
     startAssistantMessage();
 
-    logMessage(QString("POST /v1/responses model=%1 stream=true previous_response_id=%2")
+    logMessage(QString("POST /v1/responses model=%1 previous_response_id=%2 conv=%3")
                .arg(model)
-               .arg(m_lastResponseId.isEmpty() ? "(none)" : "(set)"));
+               .arg(m_lastResponseId.isEmpty() ? "(none)" : "(set)")
+               .arg(m_currentConversationName.isEmpty() ? "(new/unsaved)" : m_currentConversationName));
 
     m_reply = m_net->post(req, payload);
     connect(m_reply, &QNetworkReply::readyRead, this, &MainWindow::onReplyReadyRead);
@@ -471,27 +708,22 @@ void MainWindow::sendToOpenAI(const QString& userText)
 
 void MainWindow::onReplyReadyRead()
 {
-    if (!m_reply)
-        return;
-
+    if (!m_reply) return;
     m_sseBuffer += m_reply->readAll();
 
     while (true) {
         int sep = m_sseBuffer.indexOf("\n\n");
-        if (sep < 0)
-            break;
+        if (sep < 0) break;
 
         const QByteArray eventBlock = m_sseBuffer.left(sep);
         m_sseBuffer.remove(0, sep + 2);
 
         const QByteArray data = sseExtractData(eventBlock);
-        if (data.isEmpty())
-            continue;
+        if (data.isEmpty()) continue;
 
         if (data == "[DONE]") {
             setStatus("Done.");
             finalizeAssistantMessage();
-            logMessage("SSE: [DONE]");
             return;
         }
 
@@ -510,37 +742,33 @@ void MainWindow::onReplyReadyRead()
             const QString id = resp.value("id").toString();
             if (!id.isEmpty()) {
                 m_pendingResponseId = id;
-                logMessage("SSE: response.created id captured");
+                logMessage("SSE: response.created (id captured)");
             }
         } else if (type == "response.output_text.delta") {
             const QString d = obj.value("delta").toString();
             if (!d.isEmpty()) {
-                setStatus("Streaming...");
+                setStatus("Streaming…");
                 appendAssistantDelta(d);
             }
         } else if (type == "response.output_text.done") {
             const QString t = obj.value("text").toString();
             if (!t.isEmpty()) {
-                setStatus("Streaming...");
+                setStatus("Streaming…");
                 setAssistantFullText(t);
             }
         } else if (type == "response.completed") {
             setStatus("Done.");
             finalizeAssistantMessage();
-            logMessage("SSE: response.completed");
         } else if (type == "error") {
             const QJsonObject errObj = obj.value("error").toObject();
             const QString msg = errObj.value("message").toString();
             const QString code = errObj.value("code").toString();
-
             appendChatMessage("system", QString("OpenAI error: %1\n%2").arg(code, msg));
             logMessage("SSE error raw:\n" + jsonToPretty(obj));
-
             setStatus("ERROR.");
             if (m_reply) m_reply->abort();
             return;
         } else {
-            // Unknown event types -> Logs only
             logMessage("SSE event type=" + type + "\n" + jsonToPretty(obj));
         }
     }
@@ -548,27 +776,22 @@ void MainWindow::onReplyReadyRead()
 
 void MainWindow::onReplyFinished()
 {
-    if (!m_reply)
-        return;
+    if (!m_reply) return;
 
     const int httpStatus = m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const auto netErr = m_reply->error();
     const QString errStr = m_reply->errorString();
-    const QByteArray leftover = m_reply->readAll(); // any remaining bytes
+    const QByteArray tail = m_reply->readAll();
 
     if (netErr != QNetworkReply::NoError) {
         setStatus(QString("ERROR (HTTP %1): %2").arg(httpStatus).arg(errStr));
-        appendChatMessage("system", QString("Request finished with error.\nHTTP %1\n%2").arg(httpStatus).arg(errStr));
-
-        if (!leftover.isEmpty())
-            logMessage("HTTP body (tail):\n" + QString::fromUtf8(leftover));
-        else
-            logMessage(QString("Request finished with error. HTTP %1: %2").arg(httpStatus).arg(errStr));
+        logMessage(QString("Request finished with error. HTTP %1: %2").arg(httpStatus).arg(errStr));
+        if (!tail.isEmpty())
+            logMessage("Body (tail):\n" + QString::fromUtf8(tail));
     } else {
         setStatus("Done.");
     }
 
     m_reply->deleteLater();
     m_reply = nullptr;
-    m_sendBtn->setEnabled(true);
 }
