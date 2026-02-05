@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QGroupBox>
+#include <QListWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDateTime>
@@ -17,11 +18,15 @@
 #include <QAction>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QFileDialog>
 
 #include <QFile>
 #include <QDir>
+#include <QFileInfo>
 #include <QFileDevice>
 #include <QKeyEvent>
+#include <QImage>
+#include <QBuffer>
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -33,9 +38,18 @@
 
 /* ---------------- helpers ---------------- */
 
-static QString jsonToPretty(const QJsonObject& obj)
+static QString nowTs()
 {
-    return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+    return QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+}
+
+static QString humanBytes(qint64 b)
+{
+    const double kb = 1024.0;
+    const double mb = kb * 1024.0;
+    if (b >= (qint64)mb) return QString::number(b / mb, 'f', 2) + " MB";
+    if (b >= (qint64)kb) return QString::number(b / kb, 'f', 2) + " KB";
+    return QString::number(b) + " B";
 }
 
 static QByteArray sseExtractData(const QByteArray& eventBlock)
@@ -46,8 +60,7 @@ static QByteArray sseExtractData(const QByteArray& eventBlock)
         line = line.trimmed();
         if (line.startsWith("data:")) {
             QByteArray d = line.mid(5).trimmed();
-            if (!data.isEmpty())
-                data.append('\n');
+            if (!data.isEmpty()) data.append('\n');
             data.append(d);
         }
     }
@@ -60,20 +73,27 @@ static QGroupBox* makeGroupBox(const QString& title, QWidget* inner)
     gb->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     auto* v = new QVBoxLayout(gb);
-    v->setContentsMargins(12, 18, 12, 12); // give title breathing room
+    v->setContentsMargins(12, 18, 12, 12);
     v->setSpacing(10);
     v->addWidget(inner, 1);
 
     return gb;
 }
 
+static qint64 totalAttachBytes(const QVector<Attachment>& atts)
+{
+    qint64 t = 0;
+    for (const auto& a : atts) t += a.bytes;
+    return t;
+}
+
 /* ---------------- ctor/dtor ---------------- */
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle("ChatGPT KDE UI (Qt6 + OpenAI)");
-    resize(1250, 820);
+    resize(1250, 880);
 
     m_net = new QNetworkAccessManager(this);
 
@@ -84,6 +104,16 @@ MainWindow::MainWindow(QWidget *parent)
         auto* setKey = new QAction("Set API Key…", this);
         connect(setKey, &QAction::triggered, this, &MainWindow::onSetApiKey);
         fileMenu->addAction(setKey);
+
+        fileMenu->addSeparator();
+
+        auto* attach = new QAction("Attach Files…", this);
+        connect(attach, &QAction::triggered, this, &MainWindow::onAttachFiles);
+        fileMenu->addAction(attach);
+
+        auto* clearAttach = new QAction("Clear Attachments", this);
+        connect(clearAttach, &QAction::triggered, this, &MainWindow::onClearAttachments);
+        fileMenu->addAction(clearAttach);
 
         fileMenu->addSeparator();
 
@@ -107,7 +137,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs = new QTabWidget;
     setCentralWidget(m_tabs);
 
-    /* -------- Tab 1: Prompt -------- */
+    /* ---------------- Prompt tab ---------------- */
+
     m_promptTab = new QWidget;
 
     m_modelBox = new QComboBox;
@@ -124,19 +155,22 @@ MainWindow::MainWindow(QWidget *parent)
     m_responseBox = new QPlainTextEdit;
     m_responseBox->setReadOnly(true);
     m_responseBox->setPlaceholderText("Assistant response will stream here…");
+    m_responseBox->setMinimumHeight(320);
     m_responseBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_responseBox->setMinimumHeight(340);
 
     m_questionBox = new QPlainTextEdit;
     m_questionBox->setPlaceholderText("Type your question…");
+    m_questionBox->setMinimumHeight(220);
     m_questionBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_questionBox->setMinimumHeight(260);
     m_questionBox->installEventFilter(this);
 
-    m_hintLabel = new QLabel("Enter = send   |   Shift+Enter = newline");
+    m_hintLabel = new QLabel("Enter = send | Shift+Enter = newline | Attach: text/images (PDF disabled)");
     m_hintLabel->setStyleSheet("color:#666; font-size:12px; padding-left:2px;");
 
-    // top row
+    m_attachList = new QListWidget;
+    m_attachList->setMinimumHeight(90);
+    m_attachList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+
     auto* topRow = new QWidget;
     {
         auto* h = new QHBoxLayout(topRow);
@@ -155,7 +189,6 @@ MainWindow::MainWindow(QWidget *parent)
         h->addWidget(m_status, 0);
     }
 
-    // group boxes (real containers, no fake frame)
     m_responseGroup = makeGroupBox("Your Response", m_responseBox);
 
     auto* questionInner = new QWidget;
@@ -163,12 +196,18 @@ MainWindow::MainWindow(QWidget *parent)
         auto* v = new QVBoxLayout(questionInner);
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(8);
+
         v->addWidget(m_questionBox, 1);
+
+        auto* attachLabel = new QLabel("Attachments (sticky until cleared):");
+        attachLabel->setStyleSheet("color:#444; font-size:12px; font-weight:600;");
+        v->addWidget(attachLabel, 0);
+
+        v->addWidget(m_attachList, 0);
         v->addWidget(m_hintLabel, 0, Qt::AlignLeft);
     }
     m_questionGroup = makeGroupBox("My Question", questionInner);
 
-    // prompt layout
     {
         auto* v = new QVBoxLayout(m_promptTab);
         v->setContentsMargins(14, 14, 14, 14);
@@ -180,34 +219,37 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_tabs->addTab(m_promptTab, "Prompt");
 
-    /* -------- Tab 2: Chat -------- */
+    /* ---------------- Chat tab ---------------- */
+
     m_chatView = new QTextBrowser;
     m_chatView->setOpenExternalLinks(true);
     m_chatView->setStyleSheet("QTextBrowser { padding: 12px; font-size: 14px; }");
     m_tabs->addTab(m_chatView, "Chat");
 
-    /* -------- Tab 3: Logs -------- */
+    /* ---------------- Logs tab ---------------- */
+
     m_logView = new QPlainTextEdit;
     m_logView->setReadOnly(true);
     m_logView->setStyleSheet("QPlainTextEdit { padding: 10px; font-family: monospace; font-size: 12px; }");
     m_tabs->addTab(m_logView, "Logs");
 
-    // Conversations folder + dropdown
+    // Init storage + dropdown
     ensureConvDirs();
     refreshConversationDropdown();
+    refreshAttachmentListUI();
 
-    // Startup message into Chat tab
+    // Startup notice
     if (loadApiKeyFromDisk().isEmpty()) {
         appendChatMessage("system",
-            "Wired for OpenAI Responses API (streaming).\n"
-            "No API key found at ~/.api_key.\n"
-            "Use: File → Set API Key…");
+                          "Wired for OpenAI Responses API (streaming).\n"
+                          "No API key found at ~/.api_key.\n"
+                          "Use File → Set API Key…");
         logMessage("API key missing (~/.api_key)");
     } else {
         appendChatMessage("system",
-            "Wired for OpenAI Responses API (streaming).\n"
-            "API key loaded from ~/.api_key.\n"
-            "Ask questions in the Prompt tab.");
+                          "Wired for OpenAI Responses API (streaming).\n"
+                          "API key loaded from ~/.api_key.\n"
+                          "Ask questions in the Prompt tab.");
         logMessage("API key loaded from: " + apiKeyPath());
     }
 
@@ -245,18 +287,35 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     return QMainWindow::eventFilter(watched, event);
 }
 
-/* ---------------- status / chat / logs ---------------- */
+/* ---------------- UI helpers ---------------- */
 
-void MainWindow::setStatus(const QString& text)
-{
-    m_status->setText(text);
-}
+void MainWindow::setStatus(const QString& text) { m_status->setText(text); }
 
 void MainWindow::logMessage(const QString& text)
 {
-    const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-    m_logView->appendPlainText(QString("[%1] %2").arg(ts, text));
+    m_logView->appendPlainText(QString("[%1] %2").arg(nowTs(), text));
     m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+}
+
+void MainWindow::appendChatMessage(const QString& who, const QString& text)
+{
+    const QString ts = nowTs();
+    m_chatLines.push_back(ChatLine{who, text, ts});
+
+    const QString header =
+        (who == "you") ? "You" :
+        (who == "assistant") ? "Assistant" :
+        "System";
+
+    QString html;
+    html += "<div style='margin-bottom:12px;'>";
+    html += "<div style='font-weight:700; margin-bottom:4px;'>" + header.toHtmlEscaped()
+         + " <span style='font-weight:400; color:#666; font-size:12px;'>(" + ts.toHtmlEscaped() + ")</span></div>";
+    html += "<div style='white-space:pre-wrap;'>" + text.toHtmlEscaped() + "</div>";
+    html += "</div>";
+
+    m_chatView->append(html);
+    m_chatView->verticalScrollBar()->setValue(m_chatView->verticalScrollBar()->maximum());
 }
 
 void MainWindow::rebuildChatViewFromMemory()
@@ -280,33 +339,26 @@ void MainWindow::rebuildChatViewFromMemory()
     m_chatView->verticalScrollBar()->setValue(m_chatView->verticalScrollBar()->maximum());
 }
 
-void MainWindow::appendChatMessage(const QString& who, const QString& text)
+void MainWindow::refreshAttachmentListUI()
 {
-    const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-    m_chatLines.push_back(ChatLine{who, text, ts});
+    m_attachList->clear();
+    if (m_attachments.isEmpty()) {
+        m_attachList->addItem("(no attachments)");
+        return;
+    }
 
-    const QString header =
-        (who == "you") ? "You" :
-        (who == "assistant") ? "Assistant" :
-        "System";
-
-    QString html;
-    html += "<div style='margin-bottom:12px;'>";
-    html += "<div style='font-weight:700; margin-bottom:4px;'>" + header.toHtmlEscaped()
-         + " <span style='font-weight:400; color:#666; font-size:12px;'>(" + ts.toHtmlEscaped() + ")</span></div>";
-    html += "<div style='white-space:pre-wrap;'>" + text.toHtmlEscaped() + "</div>";
-    html += "</div>";
-
-    m_chatView->append(html);
-    m_chatView->verticalScrollBar()->setValue(m_chatView->verticalScrollBar()->maximum());
+    qint64 total = 0;
+    for (const auto& a : m_attachments) {
+        total += a.bytes;
+        const QString kind = (a.kind == AttachKind::Text) ? "TEXT" : "IMAGE";
+        m_attachList->addItem(QString("[%1] %2  (%3)").arg(kind, a.displayName, humanBytes(a.bytes)));
+    }
+    m_attachList->addItem(QString("Total attachment bytes: %1").arg(humanBytes(total)));
 }
 
 /* ---------------- API key ---------------- */
 
-QString MainWindow::apiKeyPath() const
-{
-    return QDir::homePath() + "/.api_key";
-}
+QString MainWindow::apiKeyPath() const { return QDir::homePath() + "/.api_key"; }
 
 QString MainWindow::loadApiKeyFromDisk() const
 {
@@ -327,14 +379,11 @@ bool MainWindow::saveApiKeyToDisk(const QString& key, QString* errOut)
     f.write("\n");
     f.flush();
     f.close();
-    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner); // 600
+    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     return true;
 }
 
-QString MainWindow::getApiKeyOrEmpty() const
-{
-    return loadApiKeyFromDisk();
-}
+QString MainWindow::getApiKeyOrEmpty() const { return loadApiKeyFromDisk(); }
 
 void MainWindow::onSetApiKey()
 {
@@ -349,11 +398,7 @@ void MainWindow::onSetApiKey()
     ).trimmed();
 
     if (!ok) return;
-    if (key.isEmpty()) {
-        appendChatMessage("system", "API key was empty. Not saved.");
-        logMessage("Set API key: empty input");
-        return;
-    }
+    if (key.isEmpty()) { appendChatMessage("system", "API key was empty. Not saved."); return; }
 
     QString err;
     if (!saveApiKeyToDisk(key, &err)) {
@@ -366,12 +411,9 @@ void MainWindow::onSetApiKey()
     logMessage("API key saved to: " + apiKeyPath());
 }
 
-/* ---------------- conversations on disk ---------------- */
+/* ---------------- Conversation storage ---------------- */
 
-QString MainWindow::convRootDir() const
-{
-    return QDir::homePath() + "/.chatgpt_kde";
-}
+QString MainWindow::convRootDir() const { return QDir::homePath() + "/.chatgpt_kde"; }
 
 void MainWindow::ensureConvDirs()
 {
@@ -486,7 +528,6 @@ bool MainWindow::loadConversationFromDisk(const QString& name, QString* errOut)
     }
 
     rebuildChatViewFromMemory();
-
     m_responseBox->clear();
     m_questionBox->clear();
     setStatus("Ready.");
@@ -504,7 +545,7 @@ bool MainWindow::deleteConversationFromDisk(const QString& name, QString* errOut
     return true;
 }
 
-/* ---------------- menu actions ---------------- */
+/* ---------------- Menu actions ---------------- */
 
 void MainWindow::onNewChat()
 {
@@ -611,7 +652,128 @@ void MainWindow::onConversationChanged(int index)
     logMessage("Loaded conversation: " + name + " (previous_response_id " + (m_lastResponseId.isEmpty() ? "empty" : "set") + ")");
 }
 
-/* ---------------- streaming UI ---------------- */
+/* ---------------- Attachments (text/images only) ---------------- */
+
+void MainWindow::onAttachFiles()
+{
+    const QStringList paths = QFileDialog::getOpenFileNames(
+        this,
+        "Attach files (text/images)",
+        QDir::homePath(),
+        "Text/Images (*.txt *.md *.log *.json *.yaml *.yml *.ini *.cfg *.conf *.csv *.cpp *.c *.h *.hpp *.cs *.py *.sh *.js *.ts *.java *.rs *.go *.png *.jpg *.jpeg *.webp *.pdf);;All Files (*)"
+    );
+
+    if (paths.isEmpty()) return;
+
+    int added = 0;
+    for (const QString& p : paths) {
+        QString err;
+        if (!addAttachmentFromPath(p, &err)) {
+            appendChatMessage("system", "Attach failed for " + QFileInfo(p).fileName() + ":\n" + err);
+            logMessage("Attach failed: " + p + " :: " + err);
+        } else {
+            added++;
+        }
+    }
+
+    refreshAttachmentListUI();
+    logMessage(QString("Attach done: added %1, total %2").arg(added).arg(m_attachments.size()));
+}
+
+void MainWindow::onClearAttachments()
+{
+    m_attachments.clear();
+    refreshAttachmentListUI();
+    logMessage("Attachments cleared.");
+}
+
+bool MainWindow::addAttachmentFromPath(const QString& path, QString* errOut)
+{
+    QFileInfo fi(path);
+    if (!fi.exists() || !fi.isFile()) {
+        if (errOut) *errOut = "Not a file.";
+        return false;
+    }
+
+    const QString ext = fi.suffix().toLower();
+    if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "webp")
+        return addImageAttachment(path, errOut);
+
+    if (ext == "pdf") {
+        if (errOut) *errOut = "PDF disabled. (Install/link QtPdf or use a PDF-to-image backend.)";
+        return false;
+    }
+
+    return addTextAttachment(path, errOut);
+}
+
+bool MainWindow::addTextAttachment(const QString& path, QString* errOut)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (errOut) *errOut = f.errorString();
+        return false;
+    }
+    QByteArray bytes = f.readAll();
+    f.close();
+
+    const qint64 newTotal = totalAttachBytes(m_attachments) + bytes.size();
+    if (newTotal > MAX_TOTAL_ATTACH_BYTES) {
+        if (errOut) *errOut = QString("Too large. Total attachment cap is %1.").arg(humanBytes(MAX_TOTAL_ATTACH_BYTES));
+        return false;
+    }
+
+    QString text = QString::fromUtf8(bytes);
+    if (text.size() > MAX_TEXT_CHARS)
+        text = text.left(MAX_TEXT_CHARS) + "\n\n[TRUNCATED]";
+
+    Attachment a;
+    a.kind = AttachKind::Text;
+    a.path = path;
+    a.displayName = QFileInfo(path).fileName();
+    a.mime = "text/plain";
+    a.bytes = bytes.size();
+    a.text = text;
+
+    m_attachments.push_back(a);
+    return true;
+}
+
+bool MainWindow::addImageAttachment(const QString& path, QString* errOut)
+{
+    QImage img(path);
+    if (img.isNull()) {
+        if (errOut) *errOut = "Failed to load image.";
+        return false;
+    }
+
+    QByteArray outBytes;
+    QBuffer buf(&outBytes);
+    buf.open(QIODevice::WriteOnly);
+    if (!img.save(&buf, "PNG")) {
+        if (errOut) *errOut = "Failed to encode image as PNG.";
+        return false;
+    }
+
+    const qint64 newTotal = totalAttachBytes(m_attachments) + outBytes.size();
+    if (newTotal > MAX_TOTAL_ATTACH_BYTES) {
+        if (errOut) *errOut = QString("Too large after encoding. Total attachment cap is %1.").arg(humanBytes(MAX_TOTAL_ATTACH_BYTES));
+        return false;
+    }
+
+    Attachment a;
+    a.kind = AttachKind::Image;
+    a.path = path;
+    a.displayName = QFileInfo(path).fileName();
+    a.mime = "image/png";
+    a.bytes = outBytes.size();
+    a.imageBase64 = QString::fromLatin1(outBytes.toBase64());
+
+    m_attachments.push_back(a);
+    return true;
+}
+
+/* ---------------- Streaming display ---------------- */
 
 void MainWindow::startAssistantMessage()
 {
@@ -652,11 +814,11 @@ void MainWindow::finalizeAssistantMessage()
     if (!m_pendingResponseId.isEmpty()) {
         m_lastResponseId = m_pendingResponseId;
         m_pendingResponseId.clear();
-        logMessage("Chained memory updated (previous_response_id set for next turn).");
+        logMessage("Memory updated: previous_response_id set for next turn.");
     }
 }
 
-/* ---------------- network ---------------- */
+/* ---------------- OpenAI network ---------------- */
 
 void MainWindow::sendToOpenAI(const QString& userText)
 {
@@ -664,7 +826,12 @@ void MainWindow::sendToOpenAI(const QString& userText)
     if (apiKey.isEmpty()) {
         setStatus("ERROR: No API key.");
         appendChatMessage("system", "No API key found. File → Set API Key…");
-        logMessage("No API key; refusing request.");
+        logMessage("Refused request: missing API key.");
+        return;
+    }
+
+    if (m_reply) {
+        setStatus("Busy…");
         return;
     }
 
@@ -682,10 +849,33 @@ void MainWindow::sendToOpenAI(const QString& userText)
     if (!m_lastResponseId.isEmpty())
         body["previous_response_id"] = m_lastResponseId;
 
+    QJsonArray content;
+
+    { QJsonObject part; part["type"]="input_text"; part["text"]=userText; content.append(part); }
+
+    for (const auto& a : m_attachments) {
+        if (a.kind != AttachKind::Text) continue;
+        QJsonObject part;
+        part["type"] = "input_text";
+        part["text"] = QString("=== ATTACHMENT: %1 ===\n%2\n=== END ATTACHMENT: %1 ===")
+                           .arg(a.displayName, a.text);
+        content.append(part);
+    }
+
+    for (const auto& a : m_attachments) {
+        if (a.kind != AttachKind::Image) continue;
+
+        { QJsonObject label; label["type"]="input_text"; label["text"]=QString("Image attachment: %1").arg(a.displayName); content.append(label); }
+        QJsonObject part;
+        part["type"] = "input_image";
+        part["image_base64"] = a.imageBase64;
+        content.append(part);
+    }
+
     QJsonArray input;
     QJsonObject msg;
     msg["role"] = "user";
-    msg["content"] = userText;
+    msg["content"] = content;
     input.append(msg);
     body["input"] = input;
 
@@ -696,10 +886,11 @@ void MainWindow::sendToOpenAI(const QString& userText)
     m_pendingResponseId.clear();
     startAssistantMessage();
 
-    logMessage(QString("POST /v1/responses model=%1 previous_response_id=%2 conv=%3")
+    logMessage(QString("POST /v1/responses model=%1 previous_response_id=%2 attachments=%3 bytes=%4")
                .arg(model)
                .arg(m_lastResponseId.isEmpty() ? "(none)" : "(set)")
-               .arg(m_currentConversationName.isEmpty() ? "(new/unsaved)" : m_currentConversationName));
+               .arg(m_attachments.size())
+               .arg(humanBytes(totalAttachBytes(m_attachments))));
 
     m_reply = m_net->post(req, payload);
     connect(m_reply, &QNetworkReply::readyRead, this, &MainWindow::onReplyReadyRead);
@@ -712,7 +903,7 @@ void MainWindow::onReplyReadyRead()
     m_sseBuffer += m_reply->readAll();
 
     while (true) {
-        int sep = m_sseBuffer.indexOf("\n\n");
+        const int sep = m_sseBuffer.indexOf("\n\n");
         if (sep < 0) break;
 
         const QByteArray eventBlock = m_sseBuffer.left(sep);
@@ -742,7 +933,7 @@ void MainWindow::onReplyReadyRead()
             const QString id = resp.value("id").toString();
             if (!id.isEmpty()) {
                 m_pendingResponseId = id;
-                logMessage("SSE: response.created (id captured)");
+                logMessage("SSE: response.created (captured response id)");
             }
         } else if (type == "response.output_text.delta") {
             const QString d = obj.value("delta").toString();
@@ -763,13 +954,13 @@ void MainWindow::onReplyReadyRead()
             const QJsonObject errObj = obj.value("error").toObject();
             const QString msg = errObj.value("message").toString();
             const QString code = errObj.value("code").toString();
+
             appendChatMessage("system", QString("OpenAI error: %1\n%2").arg(code, msg));
-            logMessage("SSE error raw:\n" + jsonToPretty(obj));
+            logMessage("SSE error: " + QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented)));
+
             setStatus("ERROR.");
             if (m_reply) m_reply->abort();
             return;
-        } else {
-            logMessage("SSE event type=" + type + "\n" + jsonToPretty(obj));
         }
     }
 }
@@ -785,9 +976,9 @@ void MainWindow::onReplyFinished()
 
     if (netErr != QNetworkReply::NoError) {
         setStatus(QString("ERROR (HTTP %1): %2").arg(httpStatus).arg(errStr));
-        logMessage(QString("Request finished with error. HTTP %1: %2").arg(httpStatus).arg(errStr));
+        logMessage(QString("HTTP error %1: %2").arg(httpStatus).arg(errStr));
         if (!tail.isEmpty())
-            logMessage("Body (tail):\n" + QString::fromUtf8(tail));
+            logMessage("Body tail:\n" + QString::fromUtf8(tail));
     } else {
         setStatus("Done.");
     }
