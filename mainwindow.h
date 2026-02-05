@@ -34,7 +34,7 @@ struct Attachment {
     qint64 bytes = 0;
 
     QString text;        // for text attachments
-    QString imageBase64; // for image attachments
+    QString imageBase64; // for image attachments (raw base64, no prefix)
 };
 
 class MainWindow : public QMainWindow
@@ -127,8 +127,10 @@ private:
     QNetworkAccessManager* m_net = nullptr;
     QNetworkReply*         m_reply = nullptr;
 
-    // SSE streaming state
+    // SSE + raw capture
     QByteArray m_sseBuffer;
+    QByteArray m_rawAll;     // capture everything from reply (for debugging 400s)
+
     bool       m_inAssistant = false;
     QString    m_assistantText;
 
@@ -145,7 +147,6 @@ private:
     QVector<Attachment> m_attachments;
 
 private:
-    // Limits
     static constexpr int    MAX_TEXT_CHARS = 200000;
     static constexpr qint64 MAX_TOTAL_ATTACH_BYTES = 12LL * 1024LL * 1024LL; // 12MB safety
 };

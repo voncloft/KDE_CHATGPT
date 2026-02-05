@@ -554,6 +554,7 @@ void MainWindow::onNewChat()
     m_pendingResponseId.clear();
 
     m_sseBuffer.clear();
+    m_rawAll.clear();
     m_inAssistant = false;
     m_assistantText.clear();
 
@@ -767,7 +768,7 @@ bool MainWindow::addImageAttachment(const QString& path, QString* errOut)
     a.displayName = QFileInfo(path).fileName();
     a.mime = "image/png";
     a.bytes = outBytes.size();
-    a.imageBase64 = QString::fromLatin1(outBytes.toBase64());
+    a.imageBase64 = QString::fromLatin1(outBytes.toBase64()); // RAW base64 only
 
     m_attachments.push_back(a);
     return true;
@@ -862,13 +863,15 @@ void MainWindow::sendToOpenAI(const QString& userText)
         content.append(part);
     }
 
+    // IMPORTANT: image input uses image_url with a data URL (NOT image_base64). :contentReference[oaicite:1]{index=1}
     for (const auto& a : m_attachments) {
         if (a.kind != AttachKind::Image) continue;
 
         { QJsonObject label; label["type"]="input_text"; label["text"]=QString("Image attachment: %1").arg(a.displayName); content.append(label); }
+
         QJsonObject part;
         part["type"] = "input_image";
-        part["image_base64"] = a.imageBase64;
+        part["image_url"] = QString("data:image/png;base64,%1").arg(a.imageBase64);
         content.append(part);
     }
 
@@ -883,6 +886,7 @@ void MainWindow::sendToOpenAI(const QString& userText)
 
     setStatus("Sending…");
     m_sseBuffer.clear();
+    m_rawAll.clear();
     m_pendingResponseId.clear();
     startAssistantMessage();
 
@@ -900,7 +904,12 @@ void MainWindow::sendToOpenAI(const QString& userText)
 void MainWindow::onReplyReadyRead()
 {
     if (!m_reply) return;
-    m_sseBuffer += m_reply->readAll();
+
+    const QByteArray chunk = m_reply->readAll();
+    if (chunk.isEmpty()) return;
+
+    m_rawAll += chunk;      // capture everything for debugging
+    m_sseBuffer += chunk;   // parse as SSE
 
     while (true) {
         const int sep = m_sseBuffer.indexOf("\n\n");
@@ -921,7 +930,7 @@ void MainWindow::onReplyReadyRead()
         QJsonParseError err{};
         const QJsonDocument doc = QJsonDocument::fromJson(data, &err);
         if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-            logMessage("Non-JSON SSE data:\n" + QString::fromUtf8(data));
+            // Non-JSON event or server text
             continue;
         }
 
@@ -956,7 +965,7 @@ void MainWindow::onReplyReadyRead()
             const QString code = errObj.value("code").toString();
 
             appendChatMessage("system", QString("OpenAI error: %1\n%2").arg(code, msg));
-            logMessage("SSE error: " + QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented)));
+            logMessage("SSE error:\n" + QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented)));
 
             setStatus("ERROR.");
             if (m_reply) m_reply->abort();
@@ -972,13 +981,20 @@ void MainWindow::onReplyFinished()
     const int httpStatus = m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const auto netErr = m_reply->error();
     const QString errStr = m_reply->errorString();
+
+    // Whatever is left unread (often empty because we read in readyRead)
     const QByteArray tail = m_reply->readAll();
+    if (!tail.isEmpty()) m_rawAll += tail;
 
     if (netErr != QNetworkReply::NoError) {
         setStatus(QString("ERROR (HTTP %1): %2").arg(httpStatus).arg(errStr));
         logMessage(QString("HTTP error %1: %2").arg(httpStatus).arg(errStr));
-        if (!tail.isEmpty())
-            logMessage("Body tail:\n" + QString::fromUtf8(tail));
+
+        if (!m_rawAll.isEmpty()) {
+            logMessage("Raw response bytes:\n" + QString::fromUtf8(m_rawAll));
+        } else {
+            logMessage("Raw response body was empty.");
+        }
     } else {
         setStatus("Done.");
     }
