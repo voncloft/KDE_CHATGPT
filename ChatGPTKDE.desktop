@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=ChatGPTKDE
+Comment=Qt desktop client for OpenAI ChatGPT
+Exec="/home/von/qt6 projects/ChatGPTKDE_beta/build/ChatGPTKDE"
+Icon=/home/von/qt6 projects/ChatGPTKDE_beta/build/chatgptkde.png
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true
+StartupWMClass=ChatGPTKDE
+Path=/home/von/qt6 projects/ChatGPTKDE_beta

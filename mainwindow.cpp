@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <QTextCursor>
 #include <QSizePolicy>
+#include <QIcon>
 
 #include <QMenuBar>
 #include <QAction>
@@ -92,7 +93,9 @@ static qint64 totalAttachBytes(const QVector<Attachment>& atts)
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
+    const QString hardcodedIconPath = "/home/von/qt6 projects/ChatGPTKDE_beta/build/chatgptkde.png";
     setWindowTitle("ChatGPT KDE UI (Qt6 + OpenAI)");
+    setWindowIcon(QIcon(hardcodedIconPath));
     resize(1250, 880);
 
     m_net = new QNetworkAccessManager(this);
@@ -217,21 +220,22 @@ MainWindow::MainWindow(QWidget* parent)
         v->addWidget(m_questionGroup, 2);
     }
 
-    m_tabs->addTab(m_promptTab, "Prompt");
+    const QIcon appIcon(hardcodedIconPath);
+    m_tabs->addTab(m_promptTab, appIcon, "Prompt");
 
     /* ---------------- Chat tab ---------------- */
 
     m_chatView = new QTextBrowser;
     m_chatView->setOpenExternalLinks(true);
     m_chatView->setStyleSheet("QTextBrowser { padding: 12px; font-size: 14px; }");
-    m_tabs->addTab(m_chatView, "Chat");
+    m_tabs->addTab(m_chatView, appIcon, "Chat");
 
     /* ---------------- Logs tab ---------------- */
 
     m_logView = new QPlainTextEdit;
     m_logView->setReadOnly(true);
     m_logView->setStyleSheet("QPlainTextEdit { padding: 10px; font-family: monospace; font-size: 12px; }");
-    m_tabs->addTab(m_logView, "Logs");
+    m_tabs->addTab(m_logView, appIcon, "Logs");
 
     // Init storage + dropdown
     ensureConvDirs();

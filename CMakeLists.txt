@@ -12,6 +12,7 @@ qt_add_executable(ChatGPTKDE
     main.cpp
     mainwindow.h
     mainwindow.cpp
+    resources.qrc
 )
 
 target_link_libraries(ChatGPTKDE PRIVATE Qt6::Widgets Qt6::Network)

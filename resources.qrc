@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/assets">
+    <file>assets/chatgpt-icon.svg</file>
+    <file>assets/chatgpt-icon.png</file>
+  </qresource>
+</RCC>
