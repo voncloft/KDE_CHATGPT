@@ -28,6 +28,7 @@
 #include <QKeyEvent>
 #include <QImage>
 #include <QBuffer>
+#include <QPixmap>
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -42,6 +43,27 @@
 static QString nowTs()
 {
     return QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+}
+
+static QIcon loadAppIcon()
+{
+    const QStringList candidates = {
+        QStringLiteral(":/assets/chatgpt-icon.png"),
+        QDir(QStringLiteral(CHATGPTKDE_SOURCE_DIR)).filePath("assets/chatgpt-icon.png")
+    };
+
+    for (const QString &path : candidates) {
+        if (!QFile::exists(path)) continue;
+
+        const QPixmap pixmap(path);
+        if (!pixmap.isNull()) {
+            QIcon icon;
+            icon.addPixmap(pixmap);
+            return icon;
+        }
+    }
+
+    return {};
 }
 
 static QString humanBytes(qint64 b)
@@ -93,9 +115,8 @@ static qint64 totalAttachBytes(const QVector<Attachment>& atts)
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
-    const QString hardcodedIconPath = "/home/von/qt6 projects/ChatGPTKDE_beta/build/chatgptkde.png";
     setWindowTitle("ChatGPT KDE UI (Qt6 + OpenAI)");
-    setWindowIcon(QIcon(hardcodedIconPath));
+    setWindowIcon(loadAppIcon());
     resize(1250, 880);
 
     m_net = new QNetworkAccessManager(this);
@@ -220,7 +241,7 @@ MainWindow::MainWindow(QWidget* parent)
         v->addWidget(m_questionGroup, 2);
     }
 
-    const QIcon appIcon(hardcodedIconPath);
+    const QIcon appIcon = loadAppIcon();
     m_tabs->addTab(m_promptTab, appIcon, "Prompt");
 
     /* ---------------- Chat tab ---------------- */

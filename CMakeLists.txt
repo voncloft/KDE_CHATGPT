@@ -15,4 +15,7 @@ qt_add_executable(ChatGPTKDE
     resources.qrc
 )
 
+target_compile_definitions(ChatGPTKDE PRIVATE
+    CHATGPTKDE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 target_link_libraries(ChatGPTKDE PRIVATE Qt6::Widgets Qt6::Network)

@@ -1,0 +1,5 @@
+/home/von/qt6 projects/ChatGPTKDE_beta/build_codex/CMakeFiles/ChatGPTKDE.dir
+/home/von/qt6 projects/ChatGPTKDE_beta/build_codex/CMakeFiles/edit_cache.dir
+/home/von/qt6 projects/ChatGPTKDE_beta/build_codex/CMakeFiles/rebuild_cache.dir
+/home/von/qt6 projects/ChatGPTKDE_beta/build_codex/CMakeFiles/ChatGPTKDE_autogen_timestamp_deps.dir
+/home/von/qt6 projects/ChatGPTKDE_beta/build_codex/CMakeFiles/ChatGPTKDE_autogen.dir

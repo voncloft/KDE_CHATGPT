@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_ChatGPTKDE_FILE /home/von/qt6 projects/ChatGPTKDE_beta/build_codex/ChatGPTKDE)
+set(__QT_DEPLOY_TARGET_ChatGPTKDE_TYPE EXECUTABLE)
